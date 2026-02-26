@@ -235,7 +235,7 @@
                                 style="float:left; padding-left:10px; padding-right:10px;">
                                 zoom:
                             </div>
-                            <input type="range" min="1" max="99" value="50" class="zoomSlider" id="zoomSlider" style="float:left; margin-top:4px;">
+                            <input type="range" min="1" max="999" value="500" class="zoomSlider" id="zoomSlider" style="float:left; margin-top:4px;">
                             <button class="zoomButton" id="zoomDownButton" style="float:left; margin-top:2px;">-</button>
                             <button class="zoomButton" id="zoomUpButton" style="float:left; margin-top:2px;">+</button>
                         </div>
@@ -516,7 +516,7 @@
             // From the slider.
             zoomSlider.oninput = function() {
                 zoom = Math.trunc(zoom/zoomScale)*zoomScale + 
-                       parseFloat(this.value/100.0)*zoomScale;
+                       parseFloat(this.value/1000.0)*zoomScale;
                 showZoom();
                 showViewer();
             }
@@ -524,9 +524,9 @@
             zoomDownButton.onclick = function() {
                 // if (zoom > 1) { zoom -= zoomStep; }
                 // if (zoom < 1) { zoom = 1; }
-                zoomScale /= 100;
+                zoomScale /= 10;
                 // zoomSlider.value = zoom;
-                zoomSlider.value = zoom-Math.trunc(zoom/zoomScale)*zoomScale;
+                zoomSlider.value = (zoom - Math.trunc(zoom/zoomScale)*zoomScale) / zoomScale * 1000;
                 showZoom();
                 showViewer();
             }
@@ -534,10 +534,10 @@
             zoomUpButton.onclick = function() {
                 // if (zoom < 99) { zoom += zoomStep; }
                 // if (zoom > 99) { zoom = 99; }
-                zoomScale *= 100;
+                zoomScale *= 10;
                 if (zoomScale > 100.0) { zoomScale = 100.0; }
                 // zoomSlider.value = zoom;
-                zoomSlider.value = zoom-Math.trunc(zoom/zoomScale)*zoomScale;
+                zoomSlider.value = (zoom - Math.trunc(zoom/zoomScale)*zoomScale) / zoomScale * 1000;
                 showZoom();
                 showViewer();
             }
