@@ -112,6 +112,45 @@
                 display: block;
             }
 
+            /* Debug panel styles */
+            #debugPanel {
+                display: none;
+                position: fixed;
+                bottom: 0;
+                right: 0;
+                width: 420px;
+                max-height: 50vh;
+                background: rgba(0, 0, 20, 0.92);
+                color: #0f0;
+                font-family: "Courier New", monospace;
+                font-size: 12px;
+                padding: 8px;
+                border: 1px solid #0a0;
+                z-index: 9999;
+                overflow-y: auto;
+                white-space: pre-wrap;
+                word-break: break-all;
+            }
+            #debugPanel.visible { display: block; }
+            #debugPanel .dbg-header {
+                color: #0ff;
+                font-weight: bold;
+                margin-bottom: 4px;
+                display: flex;
+                justify-content: space-between;
+            }
+            #debugPanel .dbg-section { color: #ff0; margin-top: 6px; }
+            #debugPanel button {
+                background: #030;
+                color: #0f0;
+                border: 1px solid #0a0;
+                cursor: pointer;
+                padding: 2px 8px;
+                font-family: inherit;
+                font-size: 11px;
+            }
+            #debugPanel button:hover { background: #050; }
+
             /* Style for the signals values. */
             .value {
                 background-color: var(--val-bk);
@@ -787,11 +826,169 @@
 
             //const wave = read_vcd(str);
 
-
         </script>
 
+        <!-- Debug Inspector Panel -->
+        <div id="debugPanel">
+            <div class="dbg-header">
+                <span>DEBUG (D=toggle, click wave=freeze)</span>
+                <span>
+                    <button id="dbgCopy" title="Copy debug info to clipboard">&#128203; Copy</button>
+                    <button id="dbgClose">X</button>
+                </span>
+            </div>
+            <div id="debugStatus" style="color:#888; font-size:11px; margin-bottom:4px;">LIVE — hover to inspect</div>
+            <div id="debugContent">Hover over the waveform to inspect...</div>
+        </div>
 
-    </body>
-</html>
+        <script>
+        (function() {
+            const dbgPanel = document.getElementById('debugPanel');
+            const dbgContent = document.getElementById('debugContent');
+            const dbgStatus = document.getElementById('debugStatus');
+            const dbgCopy = document.getElementById('dbgCopy');
+            const dbgClose = document.getElementById('dbgClose');
+            let debugMode = false;
+            let frozen = false;
+            let lastDebugText = '';
+
+            function setStatus() {
+                if (frozen) {
+                    dbgStatus.textContent = 'FROZEN \u2744 — click waveform again to unfreeze';
+                    dbgStatus.style.color = '#f80';
+                } else {
+                    dbgStatus.textContent = 'LIVE \u25cf — hover to inspect, click to freeze';
+                    dbgStatus.style.color = '#0f0';
+                }
+            }
+
+            // Toggle with 'D' key.
+            document.addEventListener('keydown', function(ev) {
+                if (ev.target.tagName === 'INPUT' || ev.target.tagName === 'TEXTAREA') return;
+                if (ev.key === 'd' || ev.key === 'D') {
+                    debugMode = !debugMode;
+                    dbgPanel.classList.toggle('visible', debugMode);
+                    if (debugMode) { frozen = false; setStatus(); }
+                }
+            });
+
+            dbgClose.onclick = function() {
+                debugMode = false;
+                frozen = false;
+                dbgPanel.classList.remove('visible');
+            };
+
+            // Copy to clipboard.
+            dbgCopy.onclick = function() {
+                navigator.clipboard.writeText(lastDebugText).then(function() {
+                    dbgCopy.textContent = '\u2713 Copied!';
+                    setTimeout(function() { dbgCopy.innerHTML = '&#128203; Copy'; }, 1500);
+                });
+            };
+
+            // Click on canvas: freeze/unfreeze debug data (only in debug mode).
+            canvas.addEventListener('mousedown', function(ev) {
+                if (!debugMode || !viewer) return;
+                // Toggle freeze. When unfreezing, the next mousemove will update.
+                frozen = !frozen;
+                setStatus();
+                if (!frozen) return;
+                // Freeze: capture data at click position one final time.
+                updateDebugInfo(ev);
+                // Prevent the ruler from updating when we're just freezing debug.
+                ev.stopImmediatePropagation();
+            });
+
+            function buildDebugInfo(px, py) {
+                const time = viewer.toT(px);
+
+                let info = '';
+                info += '<span class="dbg-section">=== Cursor ===</span>\n';
+                info += 'Pixel:  x=' + Math.round(px) + '  y=' + Math.round(py) + '\n';
+                info += 'Time:   ' + Math.round(time) + ' ' + (viewer.wave ? viewer.wave.unit : '') + '\n';
+                info += 'Zoom:   ' + zoom.toFixed(4) + '  clevel=' + viewer.clevel + '\n';
+                info += 'View:   start=' + Math.round(viewer.start) + '  end=' + Math.round(viewer.end) + '\n';
+                info += 'Canvas: w=' + viewer.width + '  h=' + viewer.height + '\n';
+                info += 'Corner: ' + viewer._corner + '  Size: ' + viewer._size + '\n';
+
+                // Determine which signal row the cursor is in.
+                let sigY = viewer._top;
+                let hitSig = null;
+                for (let si = 0; si < viewer._signals.length; si++) {
+                    let yTop = sigY - viewer._size;
+                    let yBot = sigY + viewer._size + viewer._space;
+                    if (py >= yTop && py <= yBot) {
+                        hitSig = viewer._signals[si];
+                        break;
+                    }
+                    sigY += viewer._size * 2 + viewer._space;
+                }
+
+                if (hitSig) {
+                    info += '\n<span class="dbg-section">=== Signal ===</span>\n';
+                    info += 'Name:   ' + hitSig.name + '\n';
+                    info += 'ID:     ' + hitSig.id + '\n';
+                    info += 'Type:   ' + JSON.stringify(hitSig.type) + '\n';
+                    info += 'clevel: ' + hitSig.clevel + '  segs: ' + hitSig.segs.length + '\n';
+                    info += 'Draw y: center=' + sigY + '  top=' + (sigY - viewer._size) + '  bot=' + (sigY + viewer._size) + '\n';
+
+                    let segs = hitSig.segs;
+                    let idx = viewer.search_by_position(segs, time);
+                    if (idx >= 0 && idx < segs.length) {
+                        let seg = segs[idx];
+                        info += '\n<span class="dbg-section">=== Segment [' + idx + '/' + segs.length + '] ===</span>\n';
+                        info += 'Value:   ' + seg.value + '\n';
+                        info += 'Raw:     ' + seg._bvalue + '\n';
+                        info += 'Time:    ' + seg.start + ' \u2192 ' + seg.end + '\n';
+                        info += 'Mode:    ' + seg.mode + ' (0=bin 1=dec 2=hex)\n';
+                        if (seg._signedWidth) info += 'Signed:  width=' + seg._signedWidth + '\n';
+                        if (seg.isString) info += 'String:  yes\n';
+                        if (seg.isReal)   info += 'Real:    yes\n';
+
+                        let sx0 = viewer.toPx(seg.start - viewer.start);
+                        let sx1 = viewer.toPx(seg.end - viewer.start);
+                        info += 'SegPx:   x0=' + sx0 + '  x1=' + sx1 + '  width=' + (sx1 - sx0) + 'px\n';
+
+                        if (idx > 0) {
+                            let prev = segs[idx - 1];
+                            info += '\n<span class="dbg-section">=== Prev Seg [' + (idx-1) + '] ===</span>\n';
+                            info += 'Value:   ' + prev.value + '\n';
+                            info += 'Time:    ' + prev.start + ' \u2192 ' + prev.end + '\n';
+                            let px0 = viewer.toPx(prev.start - viewer.start);
+                            let px1 = viewer.toPx(prev.end - viewer.start);
+                            info += 'SegPx:   x0=' + px0 + '  x1=' + px1 + '  width=' + (px1 - px0) + 'px\n';
+                        }
+                        if (idx + 1 < segs.length) {
+                            let next = segs[idx + 1];
+                            info += '\n<span class="dbg-section">=== Next Seg [' + (idx+1) + '] ===</span>\n';
+                            info += 'Value:   ' + next.value + '\n';
+                            info += 'Time:    ' + next.start + ' \u2192 ' + next.end + '\n';
+                            let nx0 = viewer.toPx(next.start - viewer.start);
+                            let nx1 = viewer.toPx(next.end - viewer.start);
+                            info += 'SegPx:   x0=' + nx0 + '  x1=' + nx1 + '  width=' + (nx1 - nx0) + 'px\n';
+                        }
+                    }
+                } else {
+                    info += '\n(no signal at this y position)\n';
+                }
+                return info;
+            }
+
+            function updateDebugInfo(ev) {
+                const rect = canvas.getBoundingClientRect();
+                const px = ev.clientX - rect.left;
+                const py = ev.clientY - rect.top;
+                let info = buildDebugInfo(px, py);
+                dbgContent.innerHTML = info;
+                lastDebugText = info.replace(/<[^>]+>/g, '');
+            }
+
+            // Inspect on hover (only when not frozen).
+            canvas.addEventListener('mousemove', function(ev) {
+                if (!debugMode || !viewer || frozen) return;
+                updateDebugInfo(ev);
+            });
+        })();
+        </script>
 
 
