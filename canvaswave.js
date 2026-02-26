@@ -414,57 +414,70 @@ class CanvasWave {
                 // Get the range of segments to draw.
                 let drawS = this.search_by_position(sig.segs,this.start);
                 let drawE = this.search_by_position(sig.segs,this.end);
-                // console.log("this.start=" + this.start +
-                //     " this.end=" + this.end + " drawS=" + drawS +
-                //     " drawE=" + drawE);
-                // Do the drawning.
-                let pX = -10;
+                // Get previous segment value to detect actual transitions.
+                let prevVal = (drawS > 0) ? sig.segs[drawS - 1].value : null;
+                // Track drawing state for filling compression gaps.
+                let lastEndX = -10;      // x where last value line ended
+                let lastDrawnVal = null; // value of last drawn segment
+                // Helper to draw a single-bit value line.
+                const drawBitLine = (val, xa, xb) => {
+                    switch(val) {
+                        case "0":
+                            this._context.moveTo(xa,y+this._size);
+                            this._context.lineTo(xb,y+this._size);
+                            break;
+                        case "1":
+                            this._context.moveTo(xa,y-this._size);
+                            this._context.lineTo(xb,y-this._size);
+                            break;
+                        case "z":
+                            this._context.moveTo(xa,y);
+                            this._context.lineTo(xb,y);
+                            break;
+                        default:
+                            for(let j = xa+this._corner; j < xb;
+                                j += this._corner) {
+                                this._context.moveTo(j,y-this._size);
+                                this._context.lineTo(j-this._corner,y+this._size);
+                            }
+                    }
+                };
+                // Do the drawing.
                 for(let i = drawS; i<=drawE; ++i) {
                     let seg = sig.segs[i];
-                    // console.log(" seg: " + seg.start + "," + seg.end + " " + seg.value);
                     if(seg.start >= this.end) {
-                        // Nothing to draw any longer.
                         break;
                     }
                     if(seg.end > this.start) {
-                        // Can draw.
-                        // Compute the end and check if it worth it to draw.
-                        let x1 = this.toPx(seg.end-this.start);
-                        if (x1 >= this.width-1) { x1 = this.width-1; }
-                        if (x1 - pX < 2) { continue; }
-                        pX = x1;
-                        // Compute the start.
+                        // Compute the start and end positions.
                         let x0 = this.toPx(seg.start-this.start);
                         if (x0 <= 0) { x0 = 0; }
-                        // Draw the start transition.
-                        this._context.moveTo(x0,y-this._size);
-                        this._context.lineTo(x0,y+this._size);
-                        if (x1 - x0 < 2) { continue }
-                        // Draw the value lines.
-                        // console.log("seg.value=" + seg.value);
-                        switch(seg.value) {
-                            case "0":
-                                this._context.moveTo(x0,y+this._size);
-                                this._context.lineTo(x1,y+this._size);
-                                break;
-                            case "1":
-                                this._context.moveTo(x0,y-this._size);
-                                this._context.lineTo(x1,y-this._size);
-                                break;
-                            case "z":
-                                this._context.moveTo(x0,y);
-                                this._context.lineTo(x1,y);
-                                break;
-                            default:
-                                for(let i = x0+this._corner; i< x1; 
-                                    i += this._corner) {
-                                    this._context.moveTo(i,y-this._size);
-                                    this._context.lineTo(i-this._corner,y+this._size);
-                                }
+                        let x1 = this.toPx(seg.end-this.start);
+                        if (x1 >= this.width-1) { x1 = this.width-1; }
+                        let valChanged = (prevVal !== null && prevVal !== seg.value);
+                        if (valChanged) {
+                            // Fill gap with old value before transition.
+                            if (lastEndX >= 0 && lastEndX < x0 && lastDrawnVal !== null) {
+                                drawBitLine(lastDrawnVal, lastEndX, x0);
+                                lastEndX = x0;
+                            }
+                            // Draw transition.
+                            this._context.moveTo(x0,y-this._size);
+                            this._context.lineTo(x0,y+this._size);
                         }
-                        // Draw the end transition.
-                        this._context.moveTo(x0,y-this._size);
-                        this._context.lineTo(x0,y+this._size);
+                        prevVal = seg.value;
+                        // Skip value lines if segment is too narrow.
+                        if (x1 - lastEndX < 2) { continue; }
+                        if (x1 - x0 < 2) { x0 = x1 - 1; }
+                        // Extend start to fill any gap with same value.
+                        let drawStart = x0;
+                        if (!valChanged && lastEndX >= 0 && lastEndX < x0) {
+                            drawStart = lastEndX;
+                        }
+                        // Draw the value line.
+                        drawBitLine(seg.value, drawStart, x1);
+                        lastEndX = x1;
+                        lastDrawnVal = seg.value;
                     }
                 }
             }
