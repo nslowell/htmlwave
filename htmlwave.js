@@ -14,10 +14,12 @@ class Segment {
     // @param value the value of the segment.
     // @param start the start time.
     // @param end   the end time.
-    constructor(value,start,end) {
+    // @param signedWidth (optional) if set, treat as signed with this bit width.
+    constructor(value,start,end,signedWidth) {
         this._bvalue  = value;
         this._start  = start;
         this._end    = end;
+        this._signedWidth = signedWidth || 0;
         // Generate the alternate value representations.
         if (this._bvalue.charAt(0).match(/[bB]/)) {
             // Bit vector value.
@@ -31,6 +33,10 @@ class Segment {
             else {
                 let bits = this._bvalue.substring(1,this._bvalue.length);
                 let val = BigInt('0b' + bits);
+                // Apply two's complement if signed and MSB is 1.
+                if (this._signedWidth > 0 && bits.length >= this._signedWidth && bits.charAt(0) === '1') {
+                    val = val - (1n << BigInt(this._signedWidth));
+                }
                 this._dvalue = val.toString();
             }
             // For the hexadecimal mode: process 4-bit by 4-bit.
@@ -136,9 +142,9 @@ class Signal {
             // There is no segment starting at 0. Add one before.
             // Create an undefined value.
             let value;
-            if (this.type > 1) {
+            if (typeof this.type === 'number' && Math.abs(this.type) > 1) {
                 value = "b";
-                for(let i=0; i<this.type; ++i) { value += "x"; }
+                for(let i=0; i<Math.abs(this.type); ++i) { value += "x"; }
             }
             else {
                 value = "x";
@@ -300,7 +306,9 @@ class Wave {
         // Update the signals' value segments.
         for(let ev of smp.events) {
             // console.log("ev=" + ev + "ev.signal=" + ev.signal);
-            ev.signal.addSegment(new Segment(ev.value,smp.start,smp.end));
+            // Pass signed bit width if the signal type is negative (signed).
+            let signedWidth = (typeof ev.signal.type === 'number' && ev.signal.type < 0) ? -ev.signal.type : 0;
+            ev.signal.addSegment(new Segment(ev.value,smp.start,smp.end,signedWidth));
         }
     }
 
@@ -389,8 +397,16 @@ function read_vcd(str) {
                         break;
                     case '$var':
                         // Declare a leaf signal.
+                        // Determine signal type from the VCD var type keyword.
+                        let varKind = section[1];
+                        let sigType;
+                        if (varKind === 'integer') {
+                            sigType = -parseInt(section[2]);
+                        } else {
+                            sigType = parseInt(section[2]);
+                        }
                         // Create and add the corresponding signal.
-                        let sig = new Signal(section[4],section[3],parseInt(section[2]));
+                        let sig = new Signal(section[4],section[3],sigType);
                         stack[stack.length-1].addSub(sig);
                         // Remember the mangled name.
                         mangle.set(section[3],sig);
