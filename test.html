@@ -1,0 +1,916 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>htmlwave tests</title>
+<style>
+body { font-family: monospace; margin: 20px; background: #1e1e1e; color: #d4d4d4; }
+h1 { color: #569cd6; }
+h2 { color: #9cdcfe; margin-top: 24px; }
+.pass { color: #4ec9b0; }
+.fail { color: #f44747; font-weight: bold; }
+.summary { font-size: 16px; margin-top: 20px; padding: 10px; border: 1px solid #555; }
+.detail { margin-left: 20px; font-size: 13px; color: #888; }
+canvas { display: none; }
+</style>
+</head>
+<body>
+<h1>htmlwave rendering tests</h1>
+<!-- Hidden canvas for CanvasWave (needs a real canvas for getBoundingClientRect) -->
+<canvas id="testCanvas" width="800" height="400" style="display:none;"></canvas>
+<div id="results"></div>
+
+<script src="htmlwave.js"></script>
+<script src="canvaswave.js"></script>
+<script>
+// canvaswave.js draw() references a bare global `context` (defined in htmlwave.html).
+// Provide a stub so tests don't crash.
+var context = { beginPath() {} };
+// canvaswave.js draw() uses bare `sig` in a for-of loop (relies on global from htmlwave.html).
+var sig;
+
+// ============================================================================
+// Minimal test framework
+// ============================================================================
+let totalTests = 0, passed = 0, failed = 0;
+const results = document.getElementById('results');
+let currentGroup = '';
+
+// Catch unhandled errors.
+window.onerror = function(msg, src, line, col, err) {
+    const div = document.createElement('div');
+    div.className = 'fail';
+    div.textContent = '  \u2717 UNCAUGHT ERROR: ' + msg + ' at ' + src + ':' + line;
+    results.appendChild(div);
+    failed++;
+    totalTests++;
+};
+
+function group(name) {
+    currentGroup = name;
+    const h = document.createElement('h2');
+    h.textContent = name;
+    results.appendChild(h);
+}
+
+function assert(condition, message) {
+    totalTests++;
+    const div = document.createElement('div');
+    if (condition) {
+        passed++;
+        div.className = 'pass';
+        div.textContent = '  \u2713 ' + message;
+    } else {
+        failed++;
+        div.className = 'fail';
+        div.textContent = '  \u2717 ' + message;
+    }
+    results.appendChild(div);
+    return condition;
+}
+
+function assertEqual(actual, expected, message) {
+    const ok = actual === expected;
+    if (!ok) {
+        assert(false, message + ' (expected: ' + JSON.stringify(expected) + ', got: ' + JSON.stringify(actual) + ')');
+    } else {
+        assert(true, message);
+    }
+}
+
+function assertApprox(actual, expected, tolerance, message) {
+    const ok = Math.abs(actual - expected) <= tolerance;
+    if (!ok) {
+        assert(false, message + ' (expected ~' + expected + ', got ' + actual + ')');
+    } else {
+        assert(true, message);
+    }
+}
+
+function showSummary() {
+    const div = document.createElement('div');
+    div.className = 'summary ' + (failed > 0 ? 'fail' : 'pass');
+    div.textContent = totalTests + ' tests: ' + passed + ' passed, ' + failed + ' failed';
+    results.appendChild(div);
+}
+
+// ============================================================================
+// Mock Canvas 2D context — records all drawing calls
+// ============================================================================
+class MockContext {
+    constructor() {
+        this.calls = [];
+        this.lineWidth = 1;
+        this.strokeStyle = '';
+        this.fillStyle = '';
+        this.font = '14px Courier New';
+    }
+    beginPath() { this.calls.push({ fn: 'beginPath' }); }
+    moveTo(x, y) { this.calls.push({ fn: 'moveTo', x, y }); }
+    lineTo(x, y) { this.calls.push({ fn: 'lineTo', x, y }); }
+    stroke() { this.calls.push({ fn: 'stroke' }); }
+    clearRect() { this.calls.push({ fn: 'clearRect' }); }
+    fillText(txt, x, y) { this.calls.push({ fn: 'fillText', txt, x, y }); }
+    measureText(txt) { return { width: txt.length * 8.4 }; } // Approximate monospace
+
+    // Helpers for test inspection
+    reset() { this.calls = []; }
+
+    // Get all lineTo calls (the actual drawn lines — each preceded by a moveTo)
+    get lines() {
+        const lines = [];
+        for (let i = 1; i < this.calls.length; i++) {
+            if (this.calls[i].fn === 'lineTo' && this.calls[i-1].fn === 'moveTo') {
+                lines.push({
+                    x0: this.calls[i-1].x, y0: this.calls[i-1].y,
+                    x1: this.calls[i].x,   y1: this.calls[i].y
+                });
+            }
+            // Handle lineTo chained after lineTo (e.g. diamond: moveTo→lineTo→lineTo)
+            if (this.calls[i].fn === 'lineTo' && this.calls[i-1].fn === 'lineTo') {
+                lines.push({
+                    x0: this.calls[i-1].x, y0: this.calls[i-1].y,
+                    x1: this.calls[i].x,   y1: this.calls[i].y
+                });
+            }
+        }
+        return lines;
+    }
+
+    // Get horizontal lines at a specific y coordinate
+    horizontalLinesAt(yCoord) {
+        return this.lines.filter(l => l.y0 === yCoord && l.y1 === yCoord);
+    }
+
+    // Get all fillText calls
+    get texts() {
+        return this.calls.filter(c => c.fn === 'fillText');
+    }
+}
+
+// Create a CanvasWave with a mock context for testing
+function createTestViewer(wave, opts) {
+    opts = opts || {};
+    const width = opts.width || 800;
+    const height = opts.height || 400;
+    // Use the real canvas but override context
+    const cnv = document.getElementById('testCanvas');
+    cnv.width = width;
+    cnv.height = height;
+    // Force getBoundingClientRect to return our size
+    cnv.getBoundingClientRect = () => ({ width, height, top: 0, left: 0 });
+
+    const pal = { signal: '#ffffff', text: '#ffffff' };
+    const cw = new CanvasWave(cnv, pal, wave);
+    // Replace the context with our mock
+    const mock = new MockContext();
+    cw._context = mock;
+    return { cw, mock };
+}
+
+// Build a simple multi-bit signal with specified transitions
+function buildMultiBitWave(transitions, bitWidth) {
+    // transitions = [ { time: 0, value: "b00001010" }, { time: 100, value: "b11110000" }, ... ]
+    // Last entry's end time will be set to last time + 100
+    bitWidth = bitWidth || 8;
+    const wave = new Wave('ns');
+    const sig = new Signal('test', 'T', bitWidth);
+    wave.addSignal(sig);
+
+    for (let i = 0; i < transitions.length; i++) {
+        const t = transitions[i];
+        const start = t.time;
+        const end = (i + 1 < transitions.length) ? transitions[i + 1].time : t.time + 100;
+        const sample = new Sample(start, end);
+        sample.events.push(new Event(sig, t.value));
+        wave.addSample(sample);
+    }
+    sig.advance(transitions[transitions.length - 1].time + 100);
+    return { wave, sig };
+}
+
+// Build a single-bit signal with transitions
+function buildSingleBitWave(transitions) {
+    // transitions = [ { time: 0, value: "0" }, { time: 50, value: "1" }, ... ]
+    const wave = new Wave('ns');
+    const sig = new Signal('clk', 'C', 1);
+    wave.addSignal(sig);
+
+    for (let i = 0; i < transitions.length; i++) {
+        const t = transitions[i];
+        const start = t.time;
+        const end = (i + 1 < transitions.length) ? transitions[i + 1].time : t.time + 100;
+        const sample = new Sample(start, end);
+        sample.events.push(new Event(sig, t.value));
+        wave.addSample(sample);
+    }
+    sig.advance(transitions[transitions.length - 1].time + 100);
+    return { wave, sig };
+}
+
+
+// ============================================================================
+// TEST SUITE
+// ============================================================================
+
+// ---------- Segment value conversion ----------
+group('Segment: value conversion');
+
+(function() {
+    // Binary display
+    let s = new Segment("b10101010", 0, 100);
+    s.mode = 0;
+    assertEqual(s.value, "b10101010", "Binary mode returns raw binary value");
+
+    // Decimal display (unsigned)
+    s.mode = 1;
+    assertEqual(s.value, "170", "Decimal mode: b10101010 = 170 unsigned");
+
+    // Hex display
+    s.mode = 2;
+    assertEqual(s.value, "haa", "Hex mode: b10101010 = haa");
+})();
+
+(function() {
+    // Decimal with all zeros
+    let s = new Segment("b00000000", 0, 100);
+    s.mode = 1;
+    assertEqual(s.value, "0", "Decimal: b00000000 = 0");
+})();
+
+(function() {
+    // Decimal with all ones (unsigned 8-bit)
+    let s = new Segment("b11111111", 0, 100);
+    s.mode = 1;
+    assertEqual(s.value, "255", "Decimal unsigned: b11111111 = 255");
+})();
+
+(function() {
+    // X and Z propagation
+    let sx = new Segment("b1010xxxx", 0, 100);
+    sx.mode = 1;
+    assertEqual(sx.value, "X", "Decimal with x bits = X");
+
+    let sz = new Segment("b1010zzzz", 0, 100);
+    sz.mode = 1;
+    assertEqual(sz.value, "Z", "Decimal with z bits = Z");
+})();
+
+
+// ---------- Signed integer conversion ----------
+group('Segment: signed integer (two\'s complement)');
+
+(function() {
+    // Positive signed value: MSB = 0
+    let s = new Segment("b01111111", 0, 100, 8);
+    s.mode = 1;
+    assertEqual(s.value, "127", "Signed 8-bit: 01111111 = +127");
+})();
+
+(function() {
+    // Negative signed value: MSB = 1, 8-bit
+    let s = new Segment("b11111111", 0, 100, 8);
+    s.mode = 1;
+    assertEqual(s.value, "-1", "Signed 8-bit: 11111111 = -1");
+})();
+
+(function() {
+    // Signed: 10000000 = -128
+    let s = new Segment("b10000000", 0, 100, 8);
+    s.mode = 1;
+    assertEqual(s.value, "-128", "Signed 8-bit: 10000000 = -128");
+})();
+
+(function() {
+    // Signed 32-bit: all 1s = -1
+    let bits = "b" + "1".repeat(32);
+    let s = new Segment(bits, 0, 100, 32);
+    s.mode = 1;
+    assertEqual(s.value, "-1", "Signed 32-bit: all 1s = -1");
+})();
+
+(function() {
+    // Signed 64-bit: large negative
+    let bits = "b1" + "0".repeat(63);
+    let s = new Segment(bits, 0, 100, 64);
+    s.mode = 1;
+    assertEqual(s.value, "-9223372036854775808", "Signed 64-bit: MSB only = -2^63");
+})();
+
+(function() {
+    // Signed 64-bit: -1
+    let bits = "b" + "1".repeat(64);
+    let s = new Segment(bits, 0, 100, 64);
+    s.mode = 1;
+    assertEqual(s.value, "-1", "Signed 64-bit: all 1s = -1");
+})();
+
+(function() {
+    // Unsigned (no signedWidth) 64-bit: all 1s = 2^64 - 1
+    let bits = "b" + "1".repeat(64);
+    let s = new Segment(bits, 0, 100, 0);
+    s.mode = 1;
+    assertEqual(s.value, "18446744073709551615", "Unsigned 64-bit: all 1s = 2^64-1");
+})();
+
+
+// ---------- String and real segments ----------
+group('Segment: string and real types');
+
+(function() {
+    let s = new Segment("sHello World", 0, 100);
+    assert(s.isString, "String segment: isString flag set");
+    s.mode = 0;
+    assertEqual(s.value, "Hello World", "String segment binary mode = raw text");
+    s.mode = 1;
+    assertEqual(s.value, "Hello World", "String segment decimal mode = raw text");
+    s.mode = 2;
+    assertEqual(s.value, "Hello World", "String segment hex mode = raw text");
+})();
+
+(function() {
+    let s = new Segment("r3.14159", 0, 100);
+    assert(s.isReal, "Real segment: isReal flag set");
+    s.mode = 1;
+    assertEqual(s.value, "3.14159", "Real segment value preserved");
+})();
+
+
+// ---------- Signal type detection ----------
+group('Signal: type promotion');
+
+(function() {
+    let sig = new Signal('str', 'S1', 0);
+    sig.addSegment(new Segment("sTest", 10, 20));
+    assertEqual(sig.type, 'string', "Signal type promoted to 'string' on string segment");
+})();
+
+(function() {
+    let sig = new Signal('flt', 'F1', 0);
+    sig.addSegment(new Segment("r2.71828", 10, 20));
+    assertEqual(sig.type, 'real', "Signal type promoted to 'real' on real segment");
+})();
+
+(function() {
+    // Negative type = signed bit vector
+    let sig = new Signal('speed', 'SP', -32);
+    assertEqual(typeof sig.type, 'number', "Signed signal type is a number");
+    assert(sig.type < 0, "Signed signal type is negative");
+    assertEqual(Math.abs(sig.type), 32, "Signed signal width is abs(type)");
+})();
+
+
+// ---------- Signal: initial undefined segment ----------
+group('Signal: initial undefined segment padding');
+
+(function() {
+    let sig = new Signal('bus', 'B', 8);
+    sig.addSegment(new Segment("b00001111", 50, 100));
+    assertEqual(sig.segs.length, 2, "Padding segment added when first segment starts after t=0");
+    assertEqual(sig.segs[0].start, 0, "Padding segment starts at t=0");
+    assertEqual(sig.segs[0].end, 50, "Padding segment ends at first segment start");
+})();
+
+(function() {
+    // Signed signal should also get proper padding
+    let sig = new Signal('sbus', 'SB', -16);
+    sig.addSegment(new Segment("b0000000000001111", 50, 100));
+    assertEqual(sig.segs.length, 2, "Signed signal gets padding segment");
+    assertEqual(sig.segs[0].start, 0, "Signed padding starts at t=0");
+})();
+
+
+// ---------- VCD parsing ----------
+group('VCD parsing');
+
+(function() {
+    let vcd = `$timescale 1ns $end
+$scope module top $end
+$var wire 1 ! clk $end
+$var wire 8 " data [7:0] $end
+$upscope $end
+$enddefinitions $end
+$dumpvars 0! b00000000 " $end
+#50 1! $end
+#100 0! b10101010 " $end
+#150 1! $end
+#200 $end`;
+
+    let wave = read_vcd(vcd);
+    assert(wave !== undefined, "VCD parsed successfully");
+    assert(wave.signals.length > 0, "VCD has signals");
+    assertEqual(wave.unit, 'ns', "VCD time unit is ns");
+})();
+
+(function() {
+    // Integer VCD var type should be signed (negative type)
+    let vcd = `$timescale 1ns $end
+$scope module top $end
+$var integer 32 ! speed $end
+$upscope $end
+$enddefinitions $end
+$dumpvars b00000000000000000000000000000000 ! $end
+#100 b11111111111111111111111111111111 ! $end
+#200 $end`;
+
+    let wave = read_vcd(vcd);
+    let sigs = wave.signals[0].subs;
+    assert(sigs.length > 0, "Integer signal parsed");
+    let intSig = sigs[0];
+    assert(intSig.type < 0, "Integer VCD type is negative (signed)");
+    assertEqual(Math.abs(intSig.type), 32, "Integer bit width = 32");
+})();
+
+
+// ---------- CanvasWave: search_by_position ----------
+group('CanvasWave: binary search');
+
+(function() {
+    let { wave, sig } = buildMultiBitWave([
+        { time: 0, value: "b00000001" },
+        { time: 100, value: "b00000010" },
+        { time: 200, value: "b00000011" },
+        { time: 300, value: "b00000100" },
+    ]);
+    let { cw } = createTestViewer(wave);
+    cw.add(sig);
+    sig.clevel = 0; // Use uncompressed segments for search test
+
+    let segs = sig.segs;
+    let idx0 = cw.search_by_position(segs, 0);
+    assertEqual(segs[idx0].start, 0, "search_by_position finds segment at t=0");
+
+    let idx150 = cw.search_by_position(segs, 150);
+    assert(segs[idx150].start <= 150 && segs[idx150].end >= 150,
+        "search_by_position finds segment containing t=150");
+
+    let idx399 = cw.search_by_position(segs, 399);
+    assert(segs[idx399].start <= 399 && segs[idx399].end >= 399,
+        "search_by_position finds segment containing t=399");
+})();
+
+
+// ---------- CanvasWave: multi-bit diamond transitions ----------
+group('Rendering: multi-bit diamond transitions');
+
+(function() {
+    // Two different values should produce diamonds at the transition
+    let { wave, sig } = buildMultiBitWave([
+        { time: 0, value: "b00001010" },
+        { time: 200, value: "b11110000" },
+    ]);
+    let { cw, mock } = createTestViewer(wave, { width: 800 });
+    cw.add(sig);
+    cw.zoom = 0;  // Full view
+    cw.position = 0;
+    cw.clear();
+    mock.reset();
+    cw.draw();
+
+    let lines = mock.lines;
+    // There should be diagonal lines (y changes) for diamond transitions
+    let diagonals = lines.filter(l => l.y0 !== l.y1);
+    assert(diagonals.length > 0, "Diamond transitions produce diagonal lines");
+
+    // Check no horizontal line crosses through a diamond region
+    // (This was the overlap bug — horizontal value lines should not extend into diamond insets)
+    let yTop = cw._top - cw._size;
+    let yBot = cw._top + cw._size;
+    let horizontalTop = lines.filter(l => l.y0 === yTop && l.y1 === yTop);
+    let horizontalBot = lines.filter(l => l.y0 === yBot && l.y1 === yBot);
+
+    // Find the transition x position
+    let transX = cw.toPx(200);
+    let corner = cw._corner;
+
+    // No horizontal line should have its endpoint exactly at transX (the diamond tip)
+    let overlapTop = horizontalTop.filter(l =>
+        (l.x0 < transX && l.x1 > transX - corner && l.x1 >= transX) ||
+        (l.x1 > transX && l.x0 < transX + corner && l.x0 <= transX)
+    );
+    let overlapBot = horizontalBot.filter(l =>
+        (l.x0 < transX && l.x1 > transX - corner && l.x1 >= transX) ||
+        (l.x1 > transX && l.x0 < transX + corner && l.x0 <= transX)
+    );
+    assert(overlapTop.length === 0, "No top horizontal line overlaps diamond transition zone");
+    assert(overlapBot.length === 0, "No bottom horizontal line overlaps diamond transition zone");
+})();
+
+
+// ---------- Narrow segment guard ----------
+group('Rendering: narrow segment guard (l0 >= l1)');
+
+(function() {
+    // Create transitions very close together so segment width < 2*corner (10px)
+    // At 800px showing 0-400 time, each time unit = 2px
+    // So a 4-time-unit segment = 8px < 10px (2*corner)
+    let { wave, sig } = buildMultiBitWave([
+        { time: 0, value: "b00001010" },
+        { time: 100, value: "b11110000" },
+        { time: 104, value: "b00001010" },   // Only 4 units = 8px, both ends have diamonds
+        { time: 200, value: "b11111111" },
+    ]);
+    let { cw, mock } = createTestViewer(wave, { width: 800 });
+    cw.add(sig);
+    cw.zoom = 0;
+    cw.position = 0;
+    cw.clear();
+    mock.reset();
+    cw.draw();
+
+    let yTop = cw._top - cw._size;
+    let yBot = cw._top + cw._size;
+
+    // Get horizontal lines in the narrow segment region (100-104 → 200px-208px in pixels)
+    let narrowStart = cw.toPx(100);
+    let narrowEnd = cw.toPx(104);
+    let corner = cw._corner;
+
+    // No horizontal line should go backward (x1 < x0) — that was the overlap bug
+    let allHoriz = mock.lines.filter(l => l.y0 === l.y1);
+    let backwards = allHoriz.filter(l => l.x1 < l.x0);
+    assert(backwards.length === 0, "No backward horizontal lines (narrow segment guard works)");
+})();
+
+
+// ---------- Same-value segment merging ----------
+group('Rendering: same-value segments (no false transitions)');
+
+(function() {
+    // Multiple segments with the same value should NOT produce transitions between them
+    let { wave, sig } = buildMultiBitWave([
+        { time: 0, value: "b00001010" },
+        { time: 100, value: "b00001010" },  // Same value
+        { time: 200, value: "b00001010" },  // Same value
+        { time: 300, value: "b11110000" },  // Different value
+    ]);
+    let { cw, mock } = createTestViewer(wave, { width: 800 });
+    cw.add(sig);
+    cw.zoom = 0;
+    cw.position = 0;
+    cw.clear();
+    mock.reset();
+    cw.draw();
+
+    let y = cw._top;
+    // Diagonal lines = diamond transitions
+    let diagonals = mock.lines.filter(l => l.y0 !== l.y1);
+
+    // Count transitions — there should be diamonds only at the actual value change points:
+    // start of first segment (x=0, entry diamond) and at t=300 (value change)
+    // The segments at t=100 and t=200 with same value should NOT add new diamonds
+    let transX100 = cw.toPx(100);
+    let transX200 = cw.toPx(200);
+
+    // No diagonal line should have its endpoint at x=transX100 or x=transX200
+    // (those are same-value transitions and should be suppressed)
+    let falseTransAt100 = diagonals.filter(l =>
+        (Math.abs(l.x0 - transX100) <= 1 || Math.abs(l.x1 - transX100) <= 1) &&
+        (l.y0 === y || l.y1 === y)  // goes through center y = diamond tip
+    );
+    let falseTransAt200 = diagonals.filter(l =>
+        (Math.abs(l.x0 - transX200) <= 1 || Math.abs(l.x1 - transX200) <= 1) &&
+        (l.y0 === y || l.y1 === y)
+    );
+    assert(falseTransAt100.length === 0, "No diamond transition at t=100 (same value as before)");
+    assert(falseTransAt200.length === 0, "No diamond transition at t=200 (same value as before)");
+})();
+
+
+// ---------- Compression gap filling ----------
+group('Rendering: compression gap filling');
+
+(function() {
+    // When compression merges segments, gaps appear.
+    // The gap fill should connect value lines without overlapping diamonds.
+    let { wave, sig } = buildMultiBitWave([
+        { time: 0, value: "b00001010" },
+        { time: 500, value: "b11110000" },
+        { time: 1000, value: "b00001010" },
+    ]);
+    let { cw, mock } = createTestViewer(wave, { width: 800 });
+    cw.add(sig);
+    cw.zoom = 0;
+    cw.position = 0;
+    cw.clear();
+    mock.reset();
+    cw.draw();
+
+    // Basic sanity: drawing should produce lines
+    assert(mock.lines.length > 0, "Compression gap fill: drawing produces lines");
+
+    // No backward horizontal lines
+    let allHoriz = mock.lines.filter(l => l.y0 === l.y1);
+    let backwards = allHoriz.filter(l => l.x1 < l.x0);
+    assert(backwards.length === 0, "Compression gap fill: no backward horizontal lines");
+})();
+
+
+// ---------- Single-bit rendering ----------
+group('Rendering: single-bit signals');
+
+(function() {
+    let { wave, sig } = buildSingleBitWave([
+        { time: 0, value: "0" },
+        { time: 100, value: "1" },
+        { time: 200, value: "0" },
+        { time: 300, value: "1" },
+    ]);
+    let { cw, mock } = createTestViewer(wave, { width: 800 });
+    cw.add(sig);
+    cw.zoom = 0;
+    cw.position = 0;
+    cw.clear();
+    mock.reset();
+    cw.draw();
+
+    let y = cw._top;
+    let yHigh = y - cw._size;
+    let yLow  = y + cw._size;
+
+    // Should have horizontal lines at yHigh (value=1) and yLow (value=0)
+    let highLines = mock.horizontalLinesAt(yHigh);
+    let lowLines = mock.horizontalLinesAt(yLow);
+    assert(highLines.length > 0, "Single-bit: has horizontal lines at high level");
+    assert(lowLines.length > 0, "Single-bit: has horizontal lines at low level");
+
+    // Should have vertical transitions
+    let verticals = mock.lines.filter(l => l.x0 === l.x1 && l.y0 !== l.y1);
+    assert(verticals.length > 0, "Single-bit: has vertical transition lines");
+})();
+
+(function() {
+    // Single-bit z value: should draw at center
+    let { wave, sig } = buildSingleBitWave([
+        { time: 0, value: "z" },
+    ]);
+    let { cw, mock } = createTestViewer(wave, { width: 800 });
+    cw.add(sig);
+    cw.zoom = 0;
+    cw.position = 0;
+    cw.clear();
+    mock.reset();
+    cw.draw();
+
+    let yCenter = cw._top;
+    let centerLines = mock.horizontalLinesAt(yCenter);
+    assert(centerLines.length > 0, "Single-bit z: draws horizontal line at center (hi-Z)");
+})();
+
+
+// ---------- Value text rendering ----------
+group('Rendering: value text placement');
+
+(function() {
+    let { wave, sig } = buildMultiBitWave([
+        { time: 0, value: "b00001010" },
+        { time: 400, value: "b11110000" },
+    ]);
+    let { cw, mock } = createTestViewer(wave, { width: 800 });
+    cw.add(sig);
+    cw.zoom = 0;
+    cw.position = 0;
+    cw.clear();
+    mock.reset();
+    cw.draw();
+
+    let texts = mock.texts;
+    // Should have value labels (not just axis labels)
+    // Filter to texts within the signal drawing area (y > 20)
+    let sigTexts = texts.filter(t => t.y > 20);
+    assert(sigTexts.length > 0, "Value text: signal values are drawn");
+
+    // The value text should be the decimal representation (default mode)
+    let found10 = sigTexts.some(t => t.txt === '10');
+    let found240 = sigTexts.some(t => t.txt === '240');
+    assert(found10 || found240, "Value text: correct decimal values displayed (10 or 240)");
+})();
+
+(function() {
+    // Text should NOT appear at random positions — only at transitions
+    let { wave, sig } = buildMultiBitWave([
+        { time: 0, value: "b00001010" },
+        { time: 100, value: "b00001010" },  // Same value
+        { time: 200, value: "b00001010" },  // Same value
+    ]);
+    let { cw, mock } = createTestViewer(wave, { width: 800 });
+    cw.add(sig);
+    cw.zoom = 0;
+    cw.position = 0;
+    cw.clear();
+    mock.reset();
+    cw.draw();
+
+    let sigTexts = mock.texts.filter(t => t.y > 20);
+    // Only one value text for the entire same-value run (not three)
+    let val10Texts = sigTexts.filter(t => t.txt === '10' || t.txt.startsWith('10'));
+    assert(val10Texts.length <= 1, "Value text: only one text for same-value run (not per-segment)");
+})();
+
+
+// ---------- Signed signal rendering path ----------
+group('Rendering: signed signals use multi-bit path');
+
+(function() {
+    // A signed signal (type = -8) should render through the multi-bit code path,
+    // not the single-bit path (which would show hatching for unknown values)
+    let { wave, sig } = buildMultiBitWave([
+        { time: 0, value: "b01111111" },
+        { time: 200, value: "b10000000" },
+    ]);
+    // Override the signal type to signed
+    sig._type = -8;
+    let { cw, mock } = createTestViewer(wave, { width: 800 });
+    cw.add(sig);
+    cw.zoom = 0;
+    cw.position = 0;
+    cw.clear();
+    mock.reset();
+    cw.draw();
+
+    // Should have diamond diagonal lines (multi-bit rendering)
+    let y = cw._top;
+    let diagonals = mock.lines.filter(l => l.y0 !== l.y1 && (l.y0 === y || l.y1 === y));
+    assert(diagonals.length > 0, "Signed type renders through multi-bit path (has diamond diagonals)");
+
+    // Should display decimal values
+    let sigTexts = mock.texts.filter(t => t.y > 20);
+    assert(sigTexts.length > 0, "Signed signal has value text labels");
+})();
+
+
+// ---------- String signal rendering ----------
+group('Rendering: string signals');
+
+(function() {
+    let wave = new Wave('ns');
+    let sig = new Signal('state', 'ST', 'string');
+    wave.addSignal(sig);
+
+    let s1 = new Sample(0, 200);
+    s1.events.push(new Event(sig, "sIDLE"));
+    wave.addSample(s1);
+
+    let s2 = new Sample(200, 400);
+    s2.events.push(new Event(sig, "sRUNNING"));
+    wave.addSample(s2);
+
+    sig.advance(400);
+
+    let { cw, mock } = createTestViewer(wave, { width: 800 });
+    cw.add(sig);
+    cw.zoom = 0;
+    cw.position = 0;
+    cw.clear();
+    mock.reset();
+    cw.draw();
+
+    // String signals should render through multi-bit path with diamonds
+    let y = cw._top;
+    let diagonals = mock.lines.filter(l => l.y0 !== l.y1 && (l.y0 === y || l.y1 === y));
+    assert(diagonals.length > 0, "String signal renders with diamond transitions");
+
+    // Should display the string value text
+    let sigTexts = mock.texts.filter(t => t.y > 20);
+    let hasIdle = sigTexts.some(t => t.txt.includes('IDLE'));
+    let hasRunning = sigTexts.some(t => t.txt.includes('RUNNING'));
+    assert(hasIdle || hasRunning, "String signal displays text value");
+})();
+
+
+// ---------- Real signal rendering ----------
+group('Rendering: real signals');
+
+(function() {
+    let wave = new Wave('ns');
+    let sig = new Signal('voltage', 'V', 'real');
+    wave.addSignal(sig);
+
+    let s1 = new Sample(0, 200);
+    s1.events.push(new Event(sig, "r1.5"));
+    wave.addSample(s1);
+
+    let s2 = new Sample(200, 400);
+    s2.events.push(new Event(sig, "r3.3"));
+    wave.addSample(s2);
+
+    sig.advance(400);
+
+    let { cw, mock } = createTestViewer(wave, { width: 800 });
+    cw.add(sig);
+    cw.zoom = 0;
+    cw.position = 0;
+    cw.clear();
+    mock.reset();
+    cw.draw();
+
+    // Real signals should render through multi-bit path
+    let y = cw._top;
+    let diagonals = mock.lines.filter(l => l.y0 !== l.y1 && (l.y0 === y || l.y1 === y));
+    assert(diagonals.length > 0, "Real signal renders with diamond transitions");
+})();
+
+
+// ---------- Diamond overlap verification ----------
+group('Rendering: diamond/horizontal overlap verification');
+
+(function() {
+    // Comprehensive overlap check: create many transitions and verify
+    // no horizontal line ever starts or ends inside a diamond zone
+    let transitions = [];
+    for (let t = 0; t < 1000; t += 50) {
+        transitions.push({ time: t, value: t % 100 === 0 ? "b00001010" : "b11110000" });
+    }
+    let { wave, sig } = buildMultiBitWave(transitions);
+    let { cw, mock } = createTestViewer(wave, { width: 800 });
+    cw.add(sig);
+    cw.zoom = 0;
+    cw.position = 0;
+    cw.clear();
+    mock.reset();
+    cw.draw();
+
+    let y = cw._top;
+    let yTop = y - cw._size;
+    let yBot = y + cw._size;
+    let corner = cw._corner;
+
+    // Find all transition x positions (where value changes)
+    let transitionXs = [];
+    for (let i = 1; i < transitions.length; i++) {
+        if (transitions[i].value !== transitions[i-1].value) {
+            transitionXs.push(cw.toPx(transitions[i].time));
+        }
+    }
+
+    // Check horizontal lines don't overlap diamond zones
+    let horizontals = mock.lines.filter(l => l.y0 === l.y1 && (l.y0 === yTop || l.y0 === yBot));
+    let overlaps = 0;
+    for (let h of horizontals) {
+        for (let tx of transitionXs) {
+            // A horizontal line overlaps if it crosses through the diamond zone [tx-corner, tx+corner]
+            // i.e., one endpoint is outside and the other is inside or past the zone
+            let hLeft = Math.min(h.x0, h.x1);
+            let hRight = Math.max(h.x0, h.x1);
+            if (hLeft < tx - corner && hRight > tx - corner && hRight <= tx + corner) {
+                overlaps++;
+            }
+            if (hRight > tx + corner && hLeft < tx + corner && hLeft >= tx - corner) {
+                overlaps++;
+            }
+            // Or the line passes completely through the diamond
+            if (hLeft < tx - corner && hRight > tx + corner) {
+                overlaps++;
+            }
+        }
+    }
+    assertEqual(overlaps, 0, "Many-transition stress test: zero horizontal/diamond overlaps");
+})();
+
+
+// ---------- Edge cases ----------
+group('Edge cases');
+
+(function() {
+    // Empty wave (just one segment)
+    let { wave, sig } = buildMultiBitWave([
+        { time: 0, value: "b00000000" },
+    ]);
+    let { cw, mock } = createTestViewer(wave, { width: 800 });
+    cw.add(sig);
+    cw.zoom = 0;
+    cw.position = 0;
+    cw.clear();
+    mock.reset();
+    cw.draw();
+    assert(mock.lines.length > 0, "Single segment renders without error");
+})();
+
+(function() {
+    // Signal starting after t=0
+    let wave = new Wave('ns');
+    let sig = new Signal('late', 'L', 8);
+    wave.addSignal(sig);
+    let s = new Sample(500, 1000);
+    s.events.push(new Event(sig, "b11001100"));
+    wave.addSample(s);
+    sig.advance(1000);
+
+    assertEqual(sig.segs.length, 2, "Late-starting signal has padding + data segment");
+    assertEqual(sig.segs[0].start, 0, "Padding fills from t=0");
+    assertEqual(sig.segs[0].end, 500, "Padding ends at first event");
+})();
+
+(function() {
+    // Default display mode is decimal (mode=1)
+    let s = new Segment("b11001100", 0, 100);
+    assertEqual(s.mode, 1, "Default segment mode is decimal (1)");
+    assertEqual(s.value, "204", "Default display value is decimal");
+})();
+
+
+// ============================================================================
+showSummary();
+</script>
+</body>
+</html>
