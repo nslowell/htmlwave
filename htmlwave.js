@@ -20,8 +20,25 @@ class Segment {
         this._start  = start;
         this._end    = end;
         this._signedWidth = signedWidth || 0;
+        // Track whether this is a string or real value.
+        this._isString = false;
+        this._isReal = false;
         // Generate the alternate value representations.
-        if (this._bvalue.charAt(0).match(/[bB]/)) {
+        if (this._bvalue.charAt(0).match(/[sS]/)) {
+            // String value: strip the 's' prefix and use directly.
+            this._isString = true;
+            let strVal = this._bvalue.substring(1);
+            this._dvalue = strVal;
+            this._hvalue = strVal;
+            this._bvalue = strVal;
+        } else if (this._bvalue.charAt(0).match(/[rR]/)) {
+            // Real value: strip the 'r' prefix and use directly.
+            this._isReal = true;
+            let realVal = this._bvalue.substring(1);
+            this._dvalue = realVal;
+            this._hvalue = realVal;
+            this._bvalue = realVal;
+        } else if (this._bvalue.charAt(0).match(/[bB]/)) {
             // Bit vector value.
             // For the decimal mode.
             if (this._bvalue.match(/[xX]/)) {
@@ -107,6 +124,10 @@ class Segment {
     get end()   { return this._end; }
 
     set end(e)  { this._end = e; }
+
+    get isString() { return this._isString; }
+
+    get isReal() { return this._isReal; }
 }
 
 
@@ -142,7 +163,11 @@ class Signal {
             // There is no segment starting at 0. Add one before.
             // Create an undefined value.
             let value;
-            if (typeof this.type === 'number' && Math.abs(this.type) > 1) {
+            if (this.type === 'string') {
+                value = "s";
+            } else if (this.type === 'real') {
+                value = "r0";
+            } else if (typeof this.type === 'number' && Math.abs(this.type) > 1) {
                 value = "b";
                 for(let i=0; i<Math.abs(this.type); ++i) { value += "x"; }
             }
@@ -159,6 +184,12 @@ class Signal {
                 // The previous segment does not touch the new one, fix it.
                 prev.end = seg.start;
             }
+        }
+        // Auto-detect string/real signals from their values.
+        if (seg.isString && this._type !== 'string') {
+            this._type = 'string';
+        } else if (seg.isReal && this._type !== 'real') {
+            this._type = 'real';
         }
         // Make the mode of the segment consistent with the others.
         if (this._segs.length > 0) {
@@ -400,8 +431,13 @@ function read_vcd(str) {
                         // Determine signal type from the VCD var type keyword.
                         let varKind = section[1];
                         let sigType;
-                        if (varKind === 'integer') {
+                        if (varKind === 'real') {
+                            sigType = 'real';
+                        } else if (varKind === 'integer') {
                             sigType = -parseInt(section[2]);
+                        } else if (parseInt(section[2]) === 0) {
+                            // Zero-width signals are typically strings.
+                            sigType = 'string';
                         } else {
                             sigType = parseInt(section[2]);
                         }
@@ -451,12 +487,16 @@ function read_vcd(str) {
                         // console.log("section[i+1]=" + section[i+1] + " section[i+2]=" + section[i+2]);
                         if (section[i+1].match(/^[01xz]/)) {
                             // One-bit event case.
-                            // console.log("One-bit for: " + section[i+1]);
-                            // console.log("str=" + section[i+1].substring(1,section[i+1].length) + " signal=" + mangle.get(section[i+1].substring(1,section[i+1].length)));
                             sample.events.push(new Event(mangle.get(section[i+1].substring(1,section[i+1].length)),section[i+1].charAt(0)));
                             i = i-1;
+                        } else if (section[i+1].match(/^[sS]/) && mangle.has(section[i+2])) {
+                            // String value event: sValue <id>
+                            sample.events.push(new Event(mangle.get(section[i+2]),section[i+1]));
+                        } else if (section[i+1].match(/^[rR]/) && mangle.has(section[i+2])) {
+                            // Real value event: rValue <id>
+                            sample.events.push(new Event(mangle.get(section[i+2]),section[i+1]));
                         } else {
-                            // console.log("Multi-bit for: "+ section[i+1] + " " + section[i+2]);
+                            // Multi-bit for: value <id>
                             sample.events.push(new Event(mangle.get(section[i+2]),section[i+1]));
                         }
                     }

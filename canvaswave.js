@@ -257,7 +257,7 @@ class CanvasWave {
             // Set the compress level for draing the signal.
             sig.clevel = this.clevel
             // console.log("sig=" + sig.id + " y=" + y);
-            if (sig.type > 1) {
+            if ((typeof sig.type === 'number' && Math.abs(sig.type) > 1) || sig.type === 'string' || sig.type === 'real') {
                 // Get the range of segments to draw.
                 let drawS = this.search_by_position(sig.segs,this.start);
                 let drawE = this.search_by_position(sig.segs,this.end);
