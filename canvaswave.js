@@ -261,68 +261,152 @@ class CanvasWave {
                 // Get the range of segments to draw.
                 let drawS = this.search_by_position(sig.segs,this.start);
                 let drawE = this.search_by_position(sig.segs,this.end);
+                // Get previous segment value to detect actual transitions.
+                let prevVal = (drawS > 0) ? sig.segs[drawS - 1].value : null;
+                // Track end of last drawn value line to fill compression gaps.
+                let lastEndX = -10;
+                let lastEndDiamond = false;
+                // Track the start of the current value run for text placement.
+                let valRunStart = -1; // left x of current value run
+                let valRunVal = null; // value of current run
+                // Helper to draw value text centered in a run region.
+                const drawValText = (runL0, runL1, val) => {
+                    let txt = val;
+                    let space = runL1 - runL0;
+                    if (space < this.textWidth("0")) { return; } // No room at all.
+                    let txtW = this.textWidth(txt);
+                    if (txtW <= space) {
+                        // Text fits, center it.
+                        let vPos = runL0 + (space - txtW) / 2;
+                        this._context.fillText(txt, Math.trunc(vPos), Math.trunc(y + this._size / 2));
+                    } else {
+                        // Text too large, truncate to fit.
+                        let availW = space - this.textWidth("~") - 2;
+                        if (availW <= 0) { return; } // Not even room for "~".
+                        // Find how many characters fit.
+                        let fitLen = txt.length;
+                        while (fitLen > 0 && this.textWidth(txt.substring(0, fitLen)) > availW) {
+                            fitLen--;
+                        }
+                        if (fitLen > 0) {
+                            txt = txt.substring(0, fitLen) + "~";
+                        } else {
+                            txt = "~";
+                        }
+                        this._context.fillText(txt, Math.trunc(runL0 + 1), Math.trunc(y + this._size / 2));
+                    }
+                };
                 // Multi-bit case.
                 for(let i = drawS; i<=drawE; ++i) {
                     let seg = sig.segs[i];
-                    // console.log(" seg: " + seg.start + "," + seg.end + " " + seg.value);
                     if(seg.start < this.end && seg.end > this.start) {
                         // Can draw.
+                        // Determine if value actually changed from previous/next.
+                        let valueChanged = (prevVal === null || prevVal !== seg.value);
+                        let nextVal = (i + 1 < sig.segs.length) ? sig.segs[i + 1].value : null;
+                        let nextChanges = (nextVal === null || nextVal !== seg.value);
                         // Compute the start.
                         let x0 = this.toPx(seg.start-this.start);
-                        let l0 = x0 + this._corner;
-                        if (x0 <= 0) { x0 = 0; l0 = x0; }
-                        let x1 = this.toPx(seg.end-this.start);
-                        let l1 = x1 - this._corner;
-                        if (x1 >= this.width-1) { x1 = this.width-1; l1 = x1; }
-                        if (i >= sig.segs.length-1) { l1 = this.width-1; }
-                        // console.log("x0=" + x0 + " x1=" + x1 + " l0=" + l0 + " l1=" + l1);
-                        if (x1 - x0 < this._corner*2 || x0 == 0) {
-                            // Too short segment, or too much to the left.
-                            // Draw only a vertical for start transition.
-                            this._context.moveTo(x0,y-this._size);
-                            this._context.lineTo(x0,y+this._size);
-                            if (x1-x0 < 2) { continue; } // Can end here.
-                        } else {
-                        // Draw a normal start transition.
-                            this._context.moveTo(x0+this._corner,y-this._size);
-                            this._context.lineTo(x0,y);
-                            this._context.lineTo(x0+this._corner,y+this._size);
-                        }
-                        // Draw the value lines.
-                        this._context.moveTo(l0,y-this._size);
-                        this._context.lineTo(l1,y-this._size);
-                        this._context.moveTo(l0,y+this._size);
-                        this._context.lineTo(l1,y+this._size);
-
-                        // Draw the value text.
-                        let txt = seg.value
-                        let vPos = l0 + (l1-l0 - this.textWidth(txt)) / 2;
-                        if (vPos < l0) {
-                            // The text is too large, cut it.
-                            let diffC = (l0-vPos)*2 / this.textWidth("0");
-                            txt = txt.substring(0,txt.length-diffC-1) + "~";
-                            vPos = l0 + this._corner;
-                            if (vPos+this.textWidth(txt) > l1-this._corner) {
-                                vPos = vPos - this._corner; 
+                        // Fill compression gap: extend previous value lines to x0.
+                        if (lastEndX >= 0 && lastEndX < x0) {
+                            if (!lastEndDiamond && !valueChanged) {
+                                // Same value continues: simple horizontal lines.
+                                this._context.moveTo(lastEndX,y-this._size);
+                                this._context.lineTo(x0,y-this._size);
+                                this._context.moveTo(lastEndX,y+this._size);
+                                this._context.lineTo(x0,y+this._size);
+                            } else {
+                                // Transition in gap: draw diamond-bounded bus.
+                                let gapW = x0 - lastEndX;
+                                let gCorner = Math.min(this._corner, Math.trunc(gapW / 2));
+                                let gL = lastEndDiamond ? lastEndX + gCorner : lastEndX;
+                                let gR = (valueChanged && x0 > 0) ? x0 - gCorner : x0;
+                                if (lastEndDiamond) {
+                                    let openR = Math.min(gL, x0);
+                                    this._context.moveTo(lastEndX, y);
+                                    this._context.lineTo(openR, y-this._size);
+                                    this._context.moveTo(lastEndX, y);
+                                    this._context.lineTo(openR, y+this._size);
+                                }
+                                if (gL < gR) {
+                                    this._context.moveTo(gL, y-this._size);
+                                    this._context.lineTo(gR, y-this._size);
+                                    this._context.moveTo(gL, y+this._size);
+                                    this._context.lineTo(gR, y+this._size);
+                                }
+                                if (valueChanged && x0 > 0) {
+                                    let closeL = Math.max(gR, lastEndX);
+                                    this._context.moveTo(closeL, y-this._size);
+                                    this._context.lineTo(x0, y);
+                                    this._context.moveTo(closeL, y+this._size);
+                                    this._context.lineTo(x0, y);
+                                }
                             }
                         }
-                        if (l1-this._corner > this.textWidth("0")) {
-                            this._context.fillText(txt, Math.trunc(vPos), Math.trunc(y+this._size/2));
+                        if (x0 <= 0) { x0 = 0; }
+                        let x1 = this.toPx(seg.end-this.start);
+                        if (x1 >= this.width-1) { x1 = this.width-1; }
+
+                        // Adaptive diamond corner: shrink to fit narrow segments.
+                        let segW = x1 - x0;
+                        let needStart = valueChanged && x0 > 0 ? 1 : 0;
+                        let needEnd = (nextChanges && x1 < this.width-1 && i < sig.segs.length-1) ? 1 : 0;
+                        let diamonds = needStart + needEnd;
+                        let corner = this._corner;
+                        if (diamonds > 0 && segW < corner * diamonds) {
+                            corner = Math.max(0, Math.trunc(segW / diamonds));
                         }
 
-                        // Draw the end transition.
-                        if (x1 == this.width-1 || i >= sig.segs.length-1 ||
-                            x1-x0 < this._corner*2) {
-                            // Too short segment, or too much to the right.
-                            // Draw only a vertical for start transition.
-                            this._context.moveTo(x1,y-this._size);
-                            this._context.lineTo(x1,y+this._size);
-                        } else {
-                            this._context.moveTo(x1-this._corner,y-this._size);
-                            this._context.lineTo(x1,y);
-                            this._context.lineTo(x1-this._corner,y+this._size);
+                        // Compute value line insets for diamond transitions.
+                        let l0 = needStart ? x0 + corner : x0;
+                        let l1 = needEnd ? x1 - corner : x1;
+                        if (i >= sig.segs.length-1) { l1 = this.width-1; }
+
+                        // When value changes, flush text for the previous run
+                        // and start a new run.
+                        if (valueChanged) {
+                            // Draw text for the previous value run.
+                            if (valRunVal !== null && valRunStart >= 0) {
+                                drawValText(valRunStart, x0, valRunVal);
+                            }
+                            // Start a new value run.
+                            valRunStart = l0;
+                            valRunVal = seg.value;
+
+                            // Draw diamond start transition.
+                            this._context.moveTo(x0+corner,y-this._size);
+                            this._context.lineTo(x0,y);
+                            this._context.lineTo(x0+corner,y+this._size);
                         }
+
+                        // Draw the value lines (only when segment is wide enough).
+                        if (l0 < l1) {
+                            this._context.moveTo(l0,y-this._size);
+                            this._context.lineTo(l1,y-this._size);
+                            this._context.moveTo(l0,y+this._size);
+                            this._context.lineTo(l1,y+this._size);
+                        }
+
+                        // Draw the end transition only if next value differs.
+                        if (nextChanges) {
+                            // Draw diamond end transition.
+                            this._context.moveTo(x1-corner,y-this._size);
+                            this._context.lineTo(x1,y);
+                            this._context.lineTo(x1-corner,y+this._size);
+                            // Flush text for the ending value run.
+                            drawValText(valRunStart >= 0 ? valRunStart : l0, l1, seg.value);
+                            valRunStart = -1;
+                            valRunVal = null;
+                        }
+                        lastEndDiamond = (nextChanges && x1 < this.width-1 && i < sig.segs.length-1);
+                        lastEndX = x1;
+                        prevVal = seg.value;
                     }
+                }
+                // Flush text for any remaining value run at end of visible area.
+                if (valRunVal !== null && valRunStart >= 0) {
+                    let endL = Math.min(lastEndX, this.width - 1);
+                    drawValText(valRunStart, endL, valRunVal);
                 }
             }
             else {
