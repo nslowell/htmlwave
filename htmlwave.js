@@ -23,15 +23,15 @@ class Segment {
             // Bit vector value.
             // For the decimal mode.
             if (this._bvalue.match(/[xX]/)) {
-                this._dvalue = "dX";
+                this._dvalue = "X";
             } 
             else if (this._bvalue.match(/[zZ]/)) {
-                this._dvalue = "dZ";
+                this._dvalue = "Z";
             }
             else {
-                let val = 
-                    parseInt(this._bvalue.substring(1,this._bvalue.length),2);
-                this._dvalue = "d" + val.toString();
+                let bits = this._bvalue.substring(1,this._bvalue.length);
+                let val = BigInt('0b' + bits);
+                this._dvalue = val.toString();
             }
             // For the hexadecimal mode: process 4-bit by 4-bit.
             let i = this._bvalue.length - 1;
@@ -59,8 +59,8 @@ class Segment {
             this._dvalue = this._bvalue;
             this._hvalue = this._bvalue;
         }
-        // Set the representation to use: by default: binary.
-        this._mode = 0;
+        // Set the representation to use: by default: decimal.
+        this._mode = 1;
     }
 
     // Set the value mode:
