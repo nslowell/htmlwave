@@ -542,13 +542,10 @@ function read_vcd(str) {
                     else if (!value) {
                         if (tok.match(/^[01xz]/)) {
                             // One-bit event case.
-                            // console.log("One-bit for: " + tok);
-                            // console.log("str=" + tok.substring(1,tok.length) + " signal=" + mangle.get(tok.substring(1,tok.length)));
                             sample.events.push(new Event(mangle.get(tok.substring(1,tok.length)),tok.charAt(0)));
                             value = undefined;
-                        // console.log("event= " + sample.events[sample.events.length-1] + " event.signal=" + sample.events[sample.events.length-1].signal);
                         } else {
-                            // New event, gets its value.
+                            // New event (multi-bit, string, or real), gets its value.
                             value = tok;
                         }
                     }
