@@ -521,7 +521,7 @@ function read_vcd(str) {
                     if (!tok.match(/#\d+/) && firstRun) {
                         // The is a bug in the vcd: there should be a # here.
                         // Assume init time.
-                        samples[samples.length-1].end = initT;
+                        if (samples.length > 0) samples[samples.length-1].end = initT;
                         // Start of a new sample.
                         sample = new Sample(initT);
                         samples.push(sample);

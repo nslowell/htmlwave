@@ -109,7 +109,7 @@
 
             /* Style for vertical space div. */
             .vspace {
-                /* No specified color since used in several kinds of panes. */
+                display: block;
             }
 
             /* Style for the signals values. */
@@ -770,6 +770,7 @@
             // Read a file.
             function readFile(input) {
                 const file = input.files[0];
+                if (!file) return;
 
                 reader.readAsText(file);
 
